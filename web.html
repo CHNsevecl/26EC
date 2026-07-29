@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>树莓派图像实时监控</title>
+    <style>
+        * { margin: 0; padding: 0; }
+        body { 
+            background: #0a0a0a; 
+            display: flex; 
+            flex-direction: column;
+            justify-content: center; 
+            align-items: center; 
+            min-height: 100vh; 
+            font-family: 'Segoe UI', Arial, sans-serif;
+            padding: 20px;
+        }
+        #container {
+            position: relative;
+            max-width: 95vw;
+            max-height: 75vh;
+            border: 3px solid #333;
+            border-radius: 16px;
+            overflow: hidden;
+            background: #1a1a1a;
+            box-shadow: 0 0 50px rgba(0,255,0,0.1);
+        }
+        #video {
+            display: block;
+            width: 100%;
+            height: auto;
+            max-height: 70vh;
+        }
+        #status-bar {
+            display: flex;
+            gap: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+            background: rgba(0,0,0,0.85);
+            padding: 12px 25px;
+            border-radius: 30px;
+            border: 1px solid #333;
+            backdrop-filter: blur(10px);
+            margin-top: 20px;
+        }
+        .status-item {
+            color: #888;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .status-dot.green { background: #0f0; box-shadow: 0 0 10px #0f0; }
+        .status-dot.red { background: #f00; box-shadow: 0 0 10px #f00; }
+        .status-dot.yellow { background: #ff0; box-shadow: 0 0 10px #ff0; }
+        .value { color: #0f0; font-weight: bold; }
+        
+        #controls {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-top: 15px;
+        }
+        #controls button {
+            padding: 10px 25px;
+            border: none;
+            border-radius: 25px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-family: 'Segoe UI', Arial, sans-serif;
+        }
+        #controls button:hover {
+            transform: scale(1.05);
+        }
+        #controls button:active {
+            transform: scale(0.95);
+        }
+        #controls button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .btn-record {
+            background: #ff4444;
+            color: white;
+        }
+        .btn-record.recording {
+            background: #ff0000;
+            animation: pulse 1s infinite;
+        }
+        .btn-list {
+            background: #2196F3;
+            color: white;
+        }
+        .btn-list:hover {
+            background: #1976D2;
+        }
+        
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        
+        #recordings-list {
+            margin-top: 15px;
+            background: rgba(0,0,0,0.8);
+            padding: 15px;
+            border-radius: 12px;
+            border: 1px solid #333;
+            max-width: 600px;
+            width: 90%;
+            display: none;
+        }
+        #recordings-list h3 {
+            color: #0f0;
+            margin-bottom: 10px;
+            font-family: 'Courier New', monospace;
+        }
+        #recordings-list ul {
+            list-style: none;
+            padding: 0;
+        }
+        #recordings-list li {
+            padding: 8px 12px;
+            margin: 5px 0;
+            background: #1a1a1a;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        #recordings-list li .file-info {
+            color: #aaa;
+            font-size: 12px;
+        }
+        #recordings-list li a {
+            color: #4CAF50;
+            text-decoration: none;
+            padding: 5px 15px;
+            border: 1px solid #4CAF50;
+            border-radius: 15px;
+            font-size: 12px;
+        }
+        #recordings-list li a:hover {
+            background: #4CAF50;
+            color: white;
+        }
+        
+        #info {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            color: #555;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            background: rgba(0,0,0,0.7);
+            padding: 8px 15px;
+            border-radius: 20px;
+            border: 1px solid #222;
+        }
+        #title {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: #0f0;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            background: rgba(0,0,0,0.7);
+            padding: 8px 15px;
+            border-radius: 20px;
+            border: 1px solid #0f0;
+            letter-spacing: 2px;
+        }
+        .recording-indicator {
+            color: #ff0000;
+            animation: pulse 1s infinite;
+            display: none;
+        }
+        .recording-indicator.active {
+            display: inline-block;
+        }
+        
+        .toast {
+            position: fixed;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0,0,0,0.9);
+            color: #0f0;
+            padding: 12px 25px;
+            border-radius: 25px;
+            border: 1px solid #0f0;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            display: none;
+            z-index: 1000;
+            animation: fadeInOut 3s ease-in-out;
+        }
+        @keyframes fadeInOut {
+            0% { opacity: 0; transform: translateX(-50%) translateY(20px); }
+            15% { opacity: 1; transform: translateX(-50%) translateY(0); }
+            85% { opacity: 1; transform: translateX(-50%) translateY(0); }
+            100% { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+        }
+        
+        @media (max-width: 600px) {
+            #status-bar { flex-direction: column; gap: 5px; padding: 10px 20px; }
+            .status-item { font-size: 11px; }
+            #controls button { padding: 8px 15px; font-size: 12px; }
+        }
+    </style>
+</head>
+<body>
+    <div id="title">📡 ZMQ STREAM</div>
+    <div id="info">树莓派 · 实时监控</div>
+    
+    <div id="container">
+        <img id="video" src="" alt="等待视频流...">
+    </div>
+    
+    <div id="status-bar">
+        <div class="status-item">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">连接中...</span>
+        </div>
+        <div class="status-item">
+            📊 FPS: <span class="value" id="fpsDisplay">0</span>
+        </div>
+        <div class="status-item">
+            📦 数据: <span class="value" id="dataSize">0</span> KB
+        </div>
+        <div class="status-item">
+            🖥️ 分辨率: <span class="value" id="resolution">等待...</span>
+        </div>
+        <div class="status-item">
+            <span class="recording-indicator" id="recordingIndicator">🔴 录制中</span>
+        </div>
+    </div>
+    
+    <div id="controls">
+        <button class="btn-record" id="recordBtn" onclick="toggleRecording()">🎥 开始录制</button>
+        <button class="btn-list" onclick="listRecordings()">📋 查看录制</button>
+    </div>
+    
+    <div id="recordings-list">
+        <h3>📼 已录制视频 (MP4)</h3>
+        <ul id="recordingsList"></ul>
+    </div>
+    
+    <div id="toast" class="toast"></div>
+    
+    <script>
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsHost = window.location.hostname;
+        const wsPort = 8765;
+        const WS_URL = `${wsProtocol}//${wsHost}:${wsPort}`;
+        
+        const img = document.getElementById('video');
+        const statusDot = document.getElementById('statusDot');
+        const statusText = document.getElementById('statusText');
+        const fpsDisplay = document.getElementById('fpsDisplay');
+        const dataSize = document.getElementById('dataSize');
+        const resolution = document.getElementById('resolution');
+        const recordBtn = document.getElementById('recordBtn');
+        const recordingIndicator = document.getElementById('recordingIndicator');
+        const recordingsList = document.getElementById('recordingsList');
+        const recordingsDiv = document.getElementById('recordings-list');
+        const toast = document.getElementById('toast');
+        
+        let ws = null;
+        let frameCount = 0;
+        let lastFpsTime = Date.now();
+        let reconnectAttempts = 0;
+        let maxReconnectAttempts = 10;
+        let isRecording = false;
+        let isProcessing = false;
+        
+        function showToast(message, isSuccess = true) {
+            toast.textContent = message;
+            toast.style.color = isSuccess ? '#0f0' : '#f00';
+            toast.style.borderColor = isSuccess ? '#0f0' : '#f00';
+            toast.style.display = 'block';
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 3000);
+        }
+        
+        function downloadFile(url, filename) {
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename || 'recording.mp4';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+        
+        function connect() {
+            try {
+                ws = new WebSocket(WS_URL);
+                
+                ws.onopen = () => {
+                    statusDot.className = 'status-dot green';
+                    statusText.textContent = '已连接';
+                    statusText.style.color = '#0f0';
+                    reconnectAttempts = 0;
+                    console.log('✅ WebSocket 连接成功');
+                    showToast('✅ WebSocket 连接成功', true);
+                };
+                
+                ws.onmessage = (event) => {
+                    try {
+                        const sizeKB = (event.data.length / 1024).toFixed(1);
+                        dataSize.textContent = sizeKB;
+                        
+                        img.src = 'data:image/jpeg;base64,' + event.data;
+                        
+                        img.onload = function() {
+                            resolution.textContent = `${this.naturalWidth}×${this.naturalHeight}`;
+                        };
+                        
+                        frameCount++;
+                        const now = Date.now();
+                        if (now - lastFpsTime >= 1000) {
+                            fpsDisplay.textContent = frameCount;
+                            frameCount = 0;
+                            lastFpsTime = now;
+                        }
+                    } catch (e) {
+                        console.error('图像处理错误:', e);
+                    }
+                };
+                
+                ws.onclose = () => {
+                    statusDot.className = 'status-dot red';
+                    statusText.textContent = '断开连接';
+                    statusText.style.color = '#f00';
+                    console.log('❌ WebSocket 断开');
+                    showToast('❌ WebSocket 断开连接', false);
+                    
+                    reconnectAttempts++;
+                    if (reconnectAttempts <= maxReconnectAttempts) {
+                        const delay = Math.min(1000 * reconnectAttempts, 10000);
+                        statusText.textContent = `重连中 (${reconnectAttempts}/${maxReconnectAttempts})...`;
+                        setTimeout(connect, delay);
+                    } else {
+                        statusText.textContent = '连接失败，请刷新页面';
+                    }
+                };
+                
+                ws.onerror = (error) => {
+                    console.error('WebSocket错误:', error);
+                    statusDot.className = 'status-dot yellow';
+                    statusText.textContent = '连接错误';
+                    showToast('⚠️ WebSocket 连接错误', false);
+                };
+                
+            } catch (e) {
+                console.error('连接异常:', e);
+                setTimeout(connect, 3000);
+            }
+        }
+        
+        async function toggleRecording() {
+            if (isProcessing) return;
+            
+            if (!isRecording) {
+                // 开始录制
+                isProcessing = true;
+                recordBtn.disabled = true;
+                try {
+                    const response = await fetch('/control', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action: 'start_record' })
+                    });
+                    const data = await response.json();
+                    if (data.success) {
+                        isRecording = true;
+                        recordBtn.textContent = '⏹ 停止录制';
+                        recordBtn.className = 'btn-record recording';
+                        recordingIndicator.classList.add('active');
+                        showToast('🎥 录制已开始', true);
+                        console.log('🎥 录制已开始');
+                    } else {
+                        showToast(data.message, false);
+                    }
+                } catch (e) {
+                    console.error('开始录制错误:', e);
+                    showToast('❌ 开始录制失败', false);
+                }
+                isProcessing = false;
+                recordBtn.disabled = false;
+            } else {
+                // 停止录制并自动下载
+                isProcessing = true;
+                recordBtn.disabled = true;
+                recordBtn.textContent = '⏳ 生成MP4...';
+                try {
+                    const response = await fetch('/control', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action: 'stop_record' })
+                    });
+                    const data = await response.json();
+                    if (data.success) {
+                        isRecording = false;
+                        recordBtn.textContent = '🎥 开始录制';
+                        recordBtn.className = 'btn-record';
+                        recordingIndicator.classList.remove('active');
+                        
+                        console.log('✅ 录制完成:', data.filename);
+                        showToast(`✅ 录制完成: ${data.filename}`, true);
+                        
+                        // 自动下载MP4
+                        setTimeout(() => {
+                            downloadFile(data.download_url, data.filename);
+                            showToast('📥 开始下载MP4...', true);
+                        }, 500);
+                        
+                    } else {
+                        showToast(data.message, false);
+                        recordBtn.textContent = '🎥 开始录制';
+                        recordBtn.className = 'btn-record';
+                        isRecording = false;
+                    }
+                } catch (e) {
+                    console.error('停止录制错误:', e);
+                    showToast('❌ 停止录制失败', false);
+                    recordBtn.textContent = '🎥 开始录制';
+                    recordBtn.className = 'btn-record';
+                    isRecording = false;
+                }
+                isProcessing = false;
+                recordBtn.disabled = false;
+            }
+        }
+        
+        async function listRecordings() {
+            try {
+                const response = await fetch('/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'list_recordings' })
+                });
+                const data = await response.json();
+                
+                if (data.recordings && data.recordings.length > 0) {
+                    recordingsList.innerHTML = '';
+                    data.recordings.forEach(item => {
+                        const li = document.createElement('li');
+                        li.innerHTML = `
+                            <span>${item.name}</span>
+                            <span class="file-info">(${item.size} - ${item.date})</span>
+                            <a href="/download?file=${item.name}" download>⬇ 下载</a>
+                        `;
+                        recordingsList.appendChild(li);
+                    });
+                    recordingsDiv.style.display = 'block';
+                } else {
+                    recordingsList.innerHTML = '<li style="color:#888;text-align:center;">暂无录制视频</li>';
+                    recordingsDiv.style.display = 'block';
+                }
+            } catch (e) {
+                console.error('列出录制文件错误:', e);
+                showToast('❌ 获取录制列表失败', false);
+            }
+        }
+        
+        connect();
+        
+        window.addEventListener('beforeunload', function() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.close();
+            }
+        });
+    </script>
+</body>
+</html>

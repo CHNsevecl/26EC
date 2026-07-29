@@ -1,0 +1,24 @@
+# 大模型文件
+*.hef
+*.onnx
+*.pb
+*.tflite
+*.bin
+
+# 编译产物
+build/
+*.o
+*.so
+*.a
+qd
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+
+# IDE 配置（可选，如果想保留可以删除这行）
+.vscode/
+
+# 日志文件
+*.txt
+*.log
