@@ -31,14 +31,20 @@ cv::Mat g_frame;
 
 // 可调控制参数（全局共享，供 Controller 读取、visual 线程通过键盘调节）
 double kp        = 0.002;    // 比例增益 (每 px 偏差输出弧度)
-double kv        = 1.0;      // 速度阻尼增益 (每 px/ms 速度输出弧度)
-double DB        = 3.0;      // 到位死区 (px), 偏差小于该值输出 0
-double STALL_MULT = 3.0;     // 卡滞增力倍率: 球近静止且有偏差时 Kp×该值
+double kv        = 1.5;      // 速度阻尼增益 (每 px/ms 速度输出弧度), 接近时制动帮助停下
+double DB        = 2.0;      // 到位死区 (px), 偏差小于该值输出 0
+double STALL_MULT = 2.0;     // 卡滞增力倍率: 减小以免近处增力过大造成"输出太大"
 double setpoint  = 320.0;    // 目标位置 (px, 默认图像中心)
-const double V_STALL = 0.02; // 卡滞判定阈值 (px/ms): |v|<该值视为球卡住
+const double V_STALL = 0.03; // 卡滞判定阈值 (px/ms): |v|<该值视为球卡住
 double max_dangle  = 0.02;   // 每次控制允许的最大角度变化 (rad)，限制角速度抑制超调
 double SOFT        = 0.004;  // 比例项软化系数: 大偏差时比例增益下降, 避免饱和猛推造成远距离震荡
-double KV2         = 2.5;    // 非线性阻尼强度: 高速回冲时二次项强减速, 抑制震荡
+double KV2         = 3.0;    // 非线性阻尼强度: 略增, 高速回冲时强减速帮助停下
+double ki          = 0.04;   // 积分增益: 消除到位区静态误差
+double I_ACT       = 40.0;   // 积分激活区(px): 仅偏差小于该值才累积/作用积分, 负责"近处挤精"消除静摩擦。
+                             //   不宜过大, 否则积分在中段持续贡献恒力, 接近目标时无法停下(停不住)
+double I_MAX       = 2.5;    // 积分上限(收敛积分最大力, 避免接近时持续推导致停不住)
+double STALL_RANGE = 25.0;   // 卡滞增力范围(px): 仅在近处小偏差(≈到位区附近)且静止时, 用Kp×STALL_MULT突破静摩擦
+                             //   不可过大, 否则远端大偏差静止会触发满幅增力导致输出过大
 
 
 bool adjust_param_by_key(int key) {
@@ -67,6 +73,18 @@ bool adjust_param_by_key(int key) {
         // KV2 非线性阻尼
         case 'o': KV2 += 0.5; return true;
         case 'h': KV2 -= 0.5; if (KV2 < 0.0) KV2 = 0.0; return true;
+        // ki 积分增益
+        case 'p': ki += 0.01; return true;
+        case 'q': ki -= 0.01; if (ki < 0.0) ki = 0.0; return true;
+        // I_ACT 积分激活区
+        case 'z': I_ACT += 10.0; return true;
+        case 'x': I_ACT -= 10.0; if (I_ACT < DB) I_ACT = DB; return true;
+        // I_MAX 积分上限
+        case '[': I_MAX += 1.0; return true;
+        case ']': I_MAX -= 1.0; if (I_MAX < 0.0) I_MAX = 0.0; return true;
+        // STALL_RANGE 卡滞增力范围
+        case 'c': STALL_RANGE += 10.0; return true;
+        case 'v': STALL_RANGE -= 10.0; if (STALL_RANGE < DB) STALL_RANGE = DB; return true;
         default: return false;
     }
 }
@@ -80,6 +98,10 @@ void print_params() {
               << " max_dangle=" << max_dangle 
               << " SOFT=" << SOFT
               << " KV2=" << KV2
+              << " ki=" << ki
+              << " I_ACT=" << I_ACT
+              << " I_MAX=" << I_MAX
+              << " STALL_RANGE=" << STALL_RANGE
               << std::endl;
 }
 
@@ -202,6 +224,8 @@ void Controller(){
               << "  DB  +/- : E/D (px)          STALL+/-: R/F (倍率)\n"
               << "  setpoint+/-: A/L (5px)      角度限速+/-: U/J\n"
               << "  SOFT软化+/- : I/K           强阻尼+/- : O/H\n"
+              << "  积分ki+/-   : P/Q           积分区+/- : Z/X  积分上限: [/]\n"
+              << "  卡滞范围+/- : C/V (STALL_RANGE, 近处突破静摩擦)\n"
               << "  ESC 退出\n";
     print_params();
 
@@ -212,10 +236,18 @@ void Controller(){
         double e = dx;    // 球相对设定点偏差 (px)
         double v = rpm_f; // 平滑速度 (px/ms, 即 dx 的时间导数)
 
+        // 到位区积分(消除静态误差), 设计要点对抗历史震问题:
+        //  1) 仅 |e|<I_ACT(到位区)才累积/作用, 远端不攒积分 → 不产生积分windup
+        //  2) 固定小步长累积 e*0.01 (与帧率无关), 慢帧不会让积分狂飙
+        //  3) I_MAX 令 ki*I_MAX 远小于输出限幅(0.5) → 积分永远无法把管道推满到尽头
+        //  4) 积分饱和冻结 + 进入死区 DB 清零, 消除残留累积
+        static double integral = 0.0;
+
         double out = 0.0;
         if (!ball_lost && std::abs(e) > DB) {
-            // 卡滞增力: 仅小球偏差、近静止时启动, 突破静摩擦
-            bool stall = (std::abs(e) < DB * 5.0 && std::abs(v) < V_STALL);
+            // 卡滞增力: 球在 STALL_RANGE 范围内且近静止时, 用 Kp×STALL_MULT 突破静摩擦
+            //   范围需覆盖到位区并延伸到中段(≥I_ACT), 消除"盲区"导致球推不动停住
+            bool stall = (std::abs(e) < STALL_RANGE && std::abs(v) < V_STALL);
             double kp_eff = stall ? kp * STALL_MULT : kp;
 
             // 比例软饱和: e/(1+SOFT*|e|) 令大偏差时有效增益下降, 避免饱和猛推造成远距离震荡
@@ -225,9 +257,25 @@ void Controller(){
             //   kv*v       线性阻尼
             //   KV2*v*|v|  二次阻尼, 高速回冲时强烈减速(抑制震荡)
             out = kp_eff * p_soft + kv * v + KV2 * v * std::abs(v);
+
+            // 仅在到位区叠加积分(消除静摩擦残差), 且贡献量受 I_MAX 限制
+            if (std::abs(e) < I_ACT) {
+                out += ki * integral;
+            }
             out = std::clamp(out, -0.5, 0.5);
+
+            // 积分更新: 仅在到位区、且输出未饱和时累积
+            bool sat_up   = (out >= 0.49 && e > 0);
+            bool sat_down = (out <= -0.49 && e < 0);
+            if (std::abs(e) < I_ACT && !sat_up && !sat_down) {
+                integral += e * 0.01;              // 固定小步长, 与帧率无关
+                integral = std::clamp(integral, -I_MAX, I_MAX);
+            }
         }
-        // |e|<=DB 或球丢失 → 输出 0 (管道放平)
+        // |e|<=DB 或球丢失 → 输出 0 (管道放平) 且清零积分, 避免残留
+        if (std::abs(e) <= DB || ball_lost) {
+            integral = 0.0;
+        }
 
         // 角速度限制 (rate limiter): 避免角度跳变过大, 抑制超调/振荡
         static bool first_cmd = true;
